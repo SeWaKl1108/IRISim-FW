@@ -36,21 +36,12 @@ QueueHandle_t qSerialOut;
 /* 
 /// Tasks
 */
-//void vtDebugOut(void *pvParameters) {
 
-  //int cnt=0;
-  //while (1) {   
-  //  DefSerMsg msg= MsgBuilder("msgbuilder created this text.  Iteration "+ String(cnt++));
-  //  xQueueSend(qSerialOut, &msg, portMAX_DELAY);
-  //  vTaskDelay(1000 / portTICK_PERIOD_MS); // 1 Sekunde warten
-  //}
-//}
 
 void vtDebugOut(void *pvParameters) {
-
-  int cnt=0;
+ 
   while (1) {   
-    DefSerMsg msg= MsgBuilder("msgbuilder created this text.  Iteration "+ String(cnt++));
+    DefSerMsg msg;
     xQueueSend(qSerialOut, &msg, portMAX_DELAY);
     vTaskDelay(1000 / portTICK_PERIOD_MS); // 1 Sekunde warten
   }
@@ -58,12 +49,15 @@ void vtDebugOut(void *pvParameters) {
 
 // Die LED an Pin 13 blinken lassen
 void TaskBlink(void *pvParameters) {
+  int cnt=0;
   pinMode(LED_BUILTIN, OUTPUT);
   for (;;) {
     digitalWrite(LED_BUILTIN, HIGH);
     vTaskDelay(1000 / portTICK_PERIOD_MS);
     digitalWrite(LED_BUILTIN, LOW);
     vTaskDelay(1000 / portTICK_PERIOD_MS);
+    DefSerMsg msg= MsgBuilder("msgbuilder created this text.  Iteration "+ String(cnt++));
+    MessageToQueue(msg);
   }
 }
 //Task to drop a line to serial terminal. Receives a message from messagequeue
@@ -78,7 +72,7 @@ void vtSerialOut(void *pvParameters)
     else
     {
       Serial.println("funzt nicht");
-    }
+    }    
   }
 }
 
@@ -112,6 +106,22 @@ void vtADPhotoDioade(void *pvParameters)
 
 }
 
+
+/* 
+/// Tasks
+*/
+
+// Method to insert a string into the respective queue
+void StringToQueue(const String& str) {
+
+  char *heapStr = strdup(str.c_str());   //string to heap to prevent getting chaffed
+    xQueueSend(qSerialOut, &heapStr, portMAX_DELAY);
+}
+void MessageToQueue(DefSerMsg msg) {
+
+  //char *heapStr = strdup(str.c_str());   //string to heap to prevent getting chaffed
+    xQueueSend(qSerialOut, &msg, portMAX_DELAY);
+}
 
 
 
