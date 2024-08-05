@@ -3,9 +3,34 @@
 #include <semphr.h>
 #include <queue.h>
 #include <time.h>
-#include "Extension.h"
 
-#pragma region Variables & Constants
+#pragma region typedef - structs - Enums
+
+// serial out control flags
+enum Verbosity
+{
+  quiet,
+  heartbeat,
+  verbose,
+  trace,
+  debug
+};
+
+typedef struct
+{
+  int tconst, amplifier, freq, targetvalue;
+} PIDParam; //, *pPidValues;
+
+typedef struct
+{
+  long TimeStamp;
+  int pdvalue;
+  float Voltage;
+} Measurement; //, *pMValue;
+
+#pragma endregion
+
+#pragma region Constants
 
 /* pin hr-name - human readable mapping of ADC pins */
 const int amplifierPin = A0;
@@ -22,32 +47,33 @@ const int COM_PRIO = 2;        // COM-task priority 0-3 highest prio is 0!
 
 const TickType_t COM_WAIT_TICK = 1; // ticks to wait for a semaphore before retrying
 const TickType_t ADC_WAIT_TICK = 1; // ticks to wait for a semaphore before retrying
+#pragma endregion
 
-/* Globally used Variables */
-int tconst = 0;
-int amplifier = 0;
-int freq = 0;
-int targetvalue = 0;
-int pdvalue = 0;
+#pragma region Variables
+
+/* Atomics */
+volatile Verbosity vlevel = trace;
 unsigned long startTime; // timestamp calculation var
+PIDParam *ppidval;
 
-/* Globally used Objects */
+/* Objects */
 SemaphoreHandle_t xComSemaphore;
 SemaphoreHandle_t xADCSemaphore;
 QueueHandle_t qSerialOut;
-QueueHandle_t qADCValue;
+Measurement MValue;
 
 #pragma endregion
 
 #pragma region Forward Declaration(s)
 
+void vtHeartBeat(void *pvParameters);
 void vtSerialOut(void *pvParameters);
-void TaskBlink(void *pvParameters);
 void vtADAmplifier(void *pvParameters);
 void StringToQueue(const String &str);
 void Init_Sys(void);
 void Init_Semaphore(void);
 void Init_Task(void);
+void HandlePIDParams(void);
 bool IsChange(int, int, int);
 
 #pragma endregion
@@ -57,10 +83,7 @@ void setup()
   Init_Sys();
   Init_Semaphore();
   Init_Task();
-
-  // start task scheduler after all tasks are defined and queued,
-  // the scheduler can be started to do it's work.
-  vTaskStartScheduler();
+  vTaskStartScheduler(); // after all tasks are defined and queued,the scheduler can be started to do it's work.
 }
 
 #pragma region Init
@@ -69,7 +92,6 @@ void Init_Sys()
   /* define pin roles */
   pinMode(LED_BUILTIN, OUTPUT);                  // OnBoard LED used as indicator
   qSerialOut = xQueueCreate(10, sizeof(char *)); // 10 pointers
-  qADCValue = xQueueCreate(10, sizeof(ADCValue));
 
   /* serial communication */
   Serial.begin(115200, SERIAL_8N1);
@@ -92,27 +114,34 @@ void Init_Semaphore()
 void Init_Task()
 {
   /* task handle stuff */
-  xTaskCreate(TaskBlink, "blinkLED", 128, NULL, 1, NULL);
-  xTaskCreate(vtSerialOut, "serialout", 256, NULL, 1, NULL); // worker task for pushing data over the serial line
+  xTaskCreate(vtHeartBeat, "blinkLED", 128, NULL, 1, NULL);
+  xTaskCreate(vtSerialOut, "serialout", 256, NULL, 2, NULL); // worker task for pushing data over the serial line
+  /* xTaskCreate(vtADAmplifier, "adcampl", 64, NULL, 1, NULL); */
 }
+
 #pragma endregion
 
 #pragma region Tasks
 
 // blink the onboard LED (pin13)
-void TaskBlink(void *pvParameters)
+void vtHeartBeat(void *pvParameters)
 {
-  int cnt = 0;
-  StringToQueue("\nFinished Initialisation.\nHeartbeat visual feedback:\nLED OnTime: " +
-                 String(LED_ON_TIME/portTICK_PERIOD_MS)+"ms\nLED OffTime: "+String(LED_OFF_TIME/portTICK_PERIOD_MS)+"ms\nPortTickPeriod: "+
-                 String(portTICK_PERIOD_MS)+"\n");
+ /*  if (vlevel == verbose || vlevel == trace || vlevel == debug)
+  {
+    StringToQueue("\nFinished Initialisation.\nHeartbeat - visual feedback: OnBoard LED\n");
+  } */
   for (;;)
   {
     digitalWrite(LED_BUILTIN, HIGH);
     vTaskDelay(LED_ON_TIME / portTICK_PERIOD_MS);
-    digitalWrite(LED_BUILTIN, LOW);  
-    StringToQueue("*** Heartbeat ***\nStill alive!\n");  
-    vTaskDelay(LED_OFF_TIME/portTICK_PERIOD_MS);
+    digitalWrite(LED_BUILTIN, LOW);
+    if (vlevel != quiet)
+    {
+      StringToQueue("\r\u2764");
+      vTaskDelay(50);
+      StringToQueue("\r  ");
+    }
+    vTaskDelay(LED_OFF_TIME / portTICK_PERIOD_MS);
   }
 }
 
@@ -120,19 +149,24 @@ void TaskBlink(void *pvParameters)
 void vtADTimeConstant(void *pvParameters)
 {
   int val = analogRead(timeConstValPin);
+  ppidval->tconst = val;
 }
 
-// check AD knob of amp value for changes
+// check AD knob of amplifier value for changes
 void vtADAmplifier(void *pvParameters)
 {
-  if (xSemaphoreTake(xADCSemaphore, ADC_WAIT_TICK) == pdTRUE)
+  for (;;)
   {
-    int val = analogRead(amplifierPin);
-    xSemaphoreGive(xADCSemaphore);
-    vTaskDelay(1);
-    if (IsChange(amplifier, val, 1))
+    if (xSemaphoreTake(xADCSemaphore, ADC_WAIT_TICK) == pdTRUE)
     {
-      amplifier = val;
+      int val = analogRead(amplifierPin);
+      xSemaphoreGive(xADCSemaphore);
+      vTaskDelay(1);
+      if (IsChange(ppidval->amplifier, val, 10))
+      {
+        ppidval->amplifier = val;
+        HandlePIDParams();
+      }
     }
   }
 }
@@ -162,12 +196,12 @@ void vtSerialOut(void *pvParameters)
   for (;;)
   {
     if (xQueueReceive(qSerialOut, &received, portMAX_DELAY))
-    {      
+    {
       if (xSemaphoreTake(xComSemaphore, COM_WAIT_TICK) == pdTRUE)
       {
-      Serial.print(received);
-       xSemaphoreGive(xComSemaphore);
-     }
+        Serial.print(received);
+        xSemaphoreGive(xComSemaphore);
+      }
       vTaskDelay(1); // one tick delay (15ms) in between reads for stability
     }
   }
@@ -175,6 +209,26 @@ void vtSerialOut(void *pvParameters)
 #pragma endregion
 
 #pragma region Methods
+
+void HandlePIDParams()
+{
+  switch (vlevel)
+  {
+  case verbose:
+    StringToQueue("PID Parameter changed\n");
+    break;
+  case trace:
+    StringToQueue("PID Parameter changed\n");
+    StringToQueue("Time Constant: " + String(ppidval->tconst) + "\n" +
+                  "Amplifier : " + String(ppidval->amplifier) + "\n" +
+                  "Frequency : " + String(ppidval->freq) + "\n" +
+                  "Target value : " + String(ppidval->targetvalue) + "\n");
+  case debug:
+    break;
+  default:
+    break;
+  }
+}
 
 // Method to insert a string into the respective queue
 void StringToQueue(const String &str)
