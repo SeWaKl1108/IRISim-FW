@@ -3,6 +3,7 @@
 #include <semphr.h>
 #include <queue.h>
 #include <time.h>
+#include "heartbeat.h"
 
 #pragma region typedef - structs - Enums
 
@@ -40,13 +41,11 @@ const int timeConstValPin = A3;
 const int pdValuePin = A4;
 
 /* Constants - task priority, ON/Off -time for blinking LED */
-const int LED_ON_TIME = 50;    // in ms
-const int LED_OFF_TIME = 5000; // in ms
-const int DEF_TASK_PRIO = 1;   // Default-task priority 0-3; highest prio is 0 (fastest execution, superpasses all other prios)!
-const int COM_PRIO = 2;        // COM-task priority 0-3 highest prio is 0!
+const int DEF_TASK_PRIO = 1; // Default-task priority 0-3; highest prio is 0 (fastest execution, superpasses all other prios)!
+const int COM_PRIO = 2;      // COM-task priority 0-3 highest prio is 0!
 
 const TickType_t COM_WAIT_TICK = 1; // ticks to wait for a semaphore before retrying
-const TickType_t ADC_WAIT_TICK = 1; // ticks to wait for a semaphore before retrying
+const TickType_t ADC_WAIT_TICK = 10; // ticks to wait for a semaphore before retrying
 #pragma endregion
 
 #pragma region Variables
@@ -54,7 +53,7 @@ const TickType_t ADC_WAIT_TICK = 1; // ticks to wait for a semaphore before retr
 /* Atomics */
 volatile Verbosity vlevel = trace;
 unsigned long startTime; // timestamp calculation var
-PIDParam *ppidval;
+PIDParam ppidval;
 
 /* Objects */
 SemaphoreHandle_t xComSemaphore;
@@ -83,6 +82,7 @@ void setup()
   Init_Sys();
   Init_Semaphore();
   Init_Task();
+  SetupTimerRegisters();
   vTaskStartScheduler(); // after all tasks are defined and queued,the scheduler can be started to do it's work.
 }
 
@@ -103,53 +103,25 @@ void Init_Semaphore()
   if ((xComSemaphore) != NULL)
   {
     xSemaphoreGive((xComSemaphore));
-  }
-  xADCSemaphore = xSemaphoreCreateBinary();
-  if ((xADCSemaphore) != NULL)
-  {
-    xSemaphoreGive((xADCSemaphore));
-  }
+  } 
 }
 
 void Init_Task()
 {
   /* task handle stuff */
-  xTaskCreate(vtHeartBeat, "blinkLED", 128, NULL, 1, NULL);
   xTaskCreate(vtSerialOut, "serialout", 256, NULL, 2, NULL); // worker task for pushing data over the serial line
-  /* xTaskCreate(vtADAmplifier, "adcampl", 64, NULL, 1, NULL); */
+  xTaskCreate(vtADAmplifier, "adcampl", 64, NULL, 1, NULL);
 }
 
 #pragma endregion
 
 #pragma region Tasks
 
-// blink the onboard LED (pin13)
-void vtHeartBeat(void *pvParameters)
-{
- /*  if (vlevel == verbose || vlevel == trace || vlevel == debug)
-  {
-    StringToQueue("\nFinished Initialisation.\nHeartbeat - visual feedback: OnBoard LED\n");
-  } */
-  for (;;)
-  {
-    digitalWrite(LED_BUILTIN, HIGH);
-    vTaskDelay(LED_ON_TIME / portTICK_PERIOD_MS);
-    digitalWrite(LED_BUILTIN, LOW);
-    if (vlevel != quiet)
-    {
-      StringToQueue("\r\u2764");
-      vTaskDelay(50);
-      StringToQueue("\r  ");
-    }
-    vTaskDelay(LED_OFF_TIME / portTICK_PERIOD_MS);
-  }
-}
-
 // check AD knob of timeconstant value for changes
 void vtADTimeConstant(void *pvParameters)
 {
   int val = analogRead(timeConstValPin);
-  ppidval->tconst = val;
+  ppidval.tconst = val;
 }
 
 // check AD knob of amplifier value for changes
@@ -161,12 +133,17 @@ void vtADAmplifier(void *pvParameters)
     {
       int val = analogRead(amplifierPin);
       xSemaphoreGive(xADCSemaphore);
-      vTaskDelay(1);
-      if (IsChange(ppidval->amplifier, val, 10))
+
+      if (IsChange(ppidval.amplifier, val, 10))
       {
-        ppidval->amplifier = val;
+        ppidval.amplifier = val;
         HandlePIDParams();
       }
+      vTaskDelay(1);
+      StringToQueue("Time Constant: " + String(ppidval.tconst) + "\n" +
+                    "Amplifier : " + String(ppidval.amplifier) + "\n" +
+                    "Frequency : " + String(ppidval.freq) + "\n" +
+                    "Target value : " + String(ppidval.targetvalue) + "\n");
     }
   }
 }
